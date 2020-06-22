@@ -1923,10 +1923,10 @@ for user to select.  Filters PROJ path from files for display."
    (expand-file-name
     (or
      dumb-jump-project
-     (locate-dominating-file filepath #'dumb-jump-get-config)
+     (locate-dominating-file filepath #'dumb-jump-get-config-denoter)
      dumb-jump-default-project))))
 
-(defun dumb-jump-get-config (dir)
+(defun dumb-jump-get-config-denoter (dir)
   "If a project denoter is in DIR then return it, otherwise
 nil. However, if DIR contains a `.dumbjumpignore' it returns nil
 to keep looking for another root."
@@ -1991,25 +1991,27 @@ to keep looking for another root."
    (t
     (dumb-jump-fetch-file-results prompt))))
 
+(defun dumb-jump-get-project-config (start-location)
+  "Return a configuration list for the project owning START-LOCATION."
+  (let* ((proj-root (dumb-jump-get-project-root start-location))
+         (proj-denoter (dumb-jump-get-config-denoter proj-root)))
+    (plist-put (when (s-ends-with? ".dumbjump" proj-denoter)
+                 (dumb-jump-read-config proj-root proj-denoter))
+               :proj-root proj-root)))
+
 (defun dumb-jump-fetch-shell-results (&optional prompt)
   (let* ((cur-file (buffer-name))
-         (proj-root (dumb-jump-get-project-root default-directory))
-         (proj-config (dumb-jump-get-config proj-root))
-         (config (when (s-ends-with? ".dumbjump" proj-config)
-                   (dumb-jump-read-config proj-root proj-config)))
-         (lang (or (plist-get config :language)
-                   (car (dumb-jump-get-lang-by-shell-contents (buffer-name))))))
-    (dumb-jump-fetch-results cur-file proj-root lang config prompt)))
+         (config (dumb-jump-get-project-config default-directory)))
+    (unless (plist-get config :language)
+      (setq config (plist-put config :language (car (dumb-jump-get-lang-by-shell-contents cur-file)))))
+    (dumb-jump-fetch-results cur-file config prompt)))
 
 (defun dumb-jump-fetch-file-results (&optional prompt)
   (let* ((cur-file (or (buffer-file-name) ""))
-         (proj-root (dumb-jump-get-project-root cur-file))
-         (proj-config (dumb-jump-get-config proj-root))
-         (config (when (s-ends-with? ".dumbjump" proj-config)
-                   (dumb-jump-read-config proj-root proj-config)))
-         (lang (or (plist-get config :language)
-                   (dumb-jump-get-language cur-file))))
-    (dumb-jump-fetch-results cur-file proj-root lang config prompt)))
+         (config (dumb-jump-get-project-config (or (buffer-file-name) default-directory))))
+    (unless (plist-get config :language)
+      (setq config (plist-put config :language (dumb-jump-get-language cur-file))))
+    (dumb-jump-fetch-results cur-file config prompt)))
 
 (defun dumb-jump-process-symbol-by-lang (lang look-for)
   "Process LANG's LOOK-FOR.  For instance, clojure needs namespace part removed."
@@ -2048,21 +2050,17 @@ to keep looking for another root."
               dumb-jump-language-file-exts)))
     (--map (plist-get it :language) found)))
 
-(defun dumb-jump-fetch-results (cur-file proj-root lang config &optional prompt)
+(defun dumb-jump-fetch-results (cur-file config &optional prompt)
   "Return a list of results based on current file context and calling grep/ag.
 CUR-FILE is the path of the current buffer.
-PROJ-ROOT is that file's root project directory.
-LANG is a string programming language with CONFIG a property list
-of project configuration."
+CONFIG is a property list of project configuration."
   (let* ((cur-line (if prompt 0 (dumb-jump-get-point-line)))
          (look-for-start (when (not prompt)
                            (- (car (bounds-of-thing-at-point 'symbol))
                             (point-at-bol))))
          (cur-line-num (line-number-at-pos))
-         (proj-config (dumb-jump-get-config proj-root))
-         (config (when (s-ends-with? ".dumbjump" proj-config)
-                   (dumb-jump-read-config proj-root proj-config)))
          (found-symbol (or prompt (dumb-jump-get-point-symbol)))
+         (lang (when config (plist-get config :language)))
          (look-for (or prompt (dumb-jump-process-symbol-by-lang lang found-symbol)))
          (pt-ctx (or (and prompt (get-text-property 0 :dumb-jump-ctx prompt))
 		     (if (and (not prompt) (not (string= cur-line look-for)))
@@ -2071,6 +2069,7 @@ of project configuration."
          (ctx-type
           (dumb-jump-get-ctx-type-by-language lang pt-ctx))
 
+         (proj-root (plist-get config :proj-root))
          (gen-funcs (dumb-jump-pick-grep-variant proj-root))
          (parse-fn (plist-get gen-funcs :parse))
          (generate-fn (plist-get gen-funcs :generate))
@@ -2760,7 +2759,7 @@ searcher symbol."
    proj-root))
 
 ;; git-grep plus ag only recommended for huge repos like the linux kernel
-(defun dumb-jump-generate-git-grep-plus-ag-command (look-for cur-file proj regexes lang exclude-paths)
+(defun dumb-jump-generate-git-grep-plus-ag-command (look-for cur-file proj regexes _lang exclude-paths)
   "Generate the ag response based on the needle LOOK-FOR in the directory PROJ.
 Using ag to search only the files found via git-grep literal symbol search."
   (let* ((filled-regexes (dumb-jump-populate-regexes look-for regexes 'ag))
@@ -2780,7 +2779,7 @@ Using ag to search only the files found via git-grep literal symbol search."
         ""
         (dumb-jump-concat-command cmd exclude-args regex-args proj))))
 
-(defun dumb-jump-generate-rg-command (look-for cur-file proj regexes lang exclude-paths)
+(defun dumb-jump-generate-rg-command (look-for _cur-file proj regexes lang exclude-paths)
   "Generate the rg response based on the needle LOOK-FOR in the directory PROJ."
   (let* ((filled-regexes (dumb-jump-populate-regexes look-for regexes 'rg))
          (rgtypes (dumb-jump-get-rg-type-by-language lang))
@@ -2832,7 +2831,7 @@ Using ag to search only the files found via git-grep literal symbol search."
         ""
         (dumb-jump-concat-command cmd dumb-jump-grep-args exclude-args include-args regex-args proj))))
 
-(defun dumb-jump-generate-gnu-grep-command (look-for cur-file proj regexes lang exclude-paths)
+(defun dumb-jump-generate-gnu-grep-command (look-for cur-file proj regexes _lang _exclude-paths)
   "Find LOOK-FOR's CUR-FILE in the PROJ with REGEXES for the LANG but not in EXCLUDE-PATHS."
   (let* ((filled-regexes (--map (shell-quote-argument it)
                                 (dumb-jump-populate-regexes look-for regexes 'gnu-grep)))
@@ -2846,7 +2845,7 @@ Using ag to search only the files found via git-grep literal symbol search."
          (regex-args (dumb-jump-arg-joiner "-e" filled-regexes)))
     (if (= (length regexes) 0)
         ""
-        (dumb-jump-concat-command cmd dumb-jump-gnu-grep-args exclude-args include-args regex-args proj))))
+      (dumb-jump-concat-command cmd dumb-jump-gnu-grep-args exclude-args include-args regex-args proj))))
 
 (defun dumb-jump-concat-command (&rest parts)
   "Concat the PARTS of a command if each part has a length."
